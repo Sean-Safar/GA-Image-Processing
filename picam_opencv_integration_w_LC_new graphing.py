@@ -11,6 +11,18 @@ from matplotlib.animation import FuncAnimation
 import matplotlib.animation as animation
 from Phidget22.Devices.VoltageRatioInput import *
 import keyboard
+import RPi.GPIO as GPIO
+
+#**********GPIO Assignment for Actuator**********#
+GPIO.setmode(GPIO.BOARD)
+GPIO.setwarnings(False)
+GPIO.setup(38,GPIO.OUT) #PWM1
+GPIO.setup(40,GPIO.OUT) #PWM2
+GPIO.setup(36,GPIO.OUT) #PWM3
+soft_pwm1 = GPIO.PWM(38,10)
+soft_pwm2 = GPIO.PWM(40,10)
+soft_pwm3 = GPIO.PWM(36,10)
+
 
 #**********CAMERA PRE-PROCESSING Parameters (use get_picam_paramters.py for adjustment)**********#
 camera = PiCamera()
@@ -53,9 +65,7 @@ plt.title('GA Pull Off Force')
 plt.xlabel('Samples')
 plt.ylabel('Force (N)')
 r= [0] #[0.000023778132175] #tare val
-
-output = []
-it_1 = 1
+output = []#[(0,0,0),(0,0,0)] #[[0,0,0],[0,0,0]]
 ch = VoltageRatioInput()
 ch.openWaitForAttachment(1000)
 ch.setBridgeGain(BridgeGain.BRIDGE_GAIN_128)
@@ -83,8 +93,9 @@ matrix_warp = np.array(matrix_warp)
 width_warp, height_warp = 580,381
 
 size_frame = (width_warp,height_warp)
+file_name_vid = "/media/flexiv-user/LINUXCNC 2_/Actuator Integration/GA_PullOff1_" + str(time.time()) + ".avi" #".h264"
 fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-final_result = cv2.VideoWriter('Vid_test_full_Show1.avi',fourcc,3,size_frame)
+final_result = cv2.VideoWriter(file_name_vid,fourcc,1,size_frame) # change to 3 for real time
 #********************************#
 
 #**********Creating Gui Slider Bars**********#
@@ -164,13 +175,14 @@ def getContours(img,imgContour):
             return(float(final_area))
 
 #**********Animate function for Video and Load Cell**********#
-def animate(i,output_,r_,it_1,ch,ys):
+def animate(i,output_,r_,ch,ys):
 
     for frame in camera.capture_continuous(rawCapture, format="bgr", use_video_port=True):
 	# grab the raw NumPy array representing the image, then initialize the timestamp
 	# and occupied/unoccupied text
         key = cv2.waitKey(1) & 0xFF #need this line for sudo command to run with Video
         image_norm = frame.array
+        it_1 = 0
         ############## UNDISTORTION #####################################################
         #h,  w = image_norm.shape[:2]
         newCameraMatrix, roi = cv2.getOptimalNewCameraMatrix(cameraMatrix, dist_param, (frame_width,frame_height), 1, (frame_width,frame_height)) #need roi or get buffer error
@@ -194,6 +206,8 @@ def animate(i,output_,r_,it_1,ch,ys):
         #threshold7 = cv2.getTrackbarPos("Gamma", "Parameters")
         threshold7 = 4
         imgGamma = exposure.adjust_gamma(image_warp,threshold7)
+        pix_intensity = np.average(imgGamma) #can add ,axis(0,1) for all channels #can change for bounding rectangle for more accurate but also loss of frames
+        #print(pix_intensity)
         #lab = cv2.cvtColor(imgGamma, cv2.COLOR_BGR2LAB)
         #l_channel, a, b = cv2.split(lab)
 	# Applying CLAHE to L-channel
@@ -241,8 +255,8 @@ def animate(i,output_,r_,it_1,ch,ys):
 	# clear the stream in preparation for the next frame
         rawCapture.truncate(0)
         rawCapture.seek(0)
-        it_1 += 1
-        if it_1 > 1:
+        it_1 = 1
+        if it_1 > 0:
             break
 	# if the `q` key was pressed, break from the loop
         #if keyboard.is_pressed('t'):
@@ -253,6 +267,7 @@ def animate(i,output_,r_,it_1,ch,ys):
         #*****LOAD CELL CODE*****#
     voltageRatio = ch.getVoltageRatio()
     #next_index = next(index)
+    force_diff = 0
 
     if keyboard.is_pressed('t'):
         r_[0] = ch.getVoltageRatio()
@@ -260,6 +275,29 @@ def animate(i,output_,r_,it_1,ch,ys):
     new_ratio = (voltageRatio - r_[0]) * 33291104.7583953
     new_ratio_F = new_ratio * .009806650028638
         
+    if new_ratio_F == 0:
+        GPIO.output(40,0)
+        #soft_pwm1.start(100)
+        GPIO.output(38,1)
+        soft_pwm3.start(10)
+    if new_ratio_F >= 10 and new_ratio_F <= 20:
+        #soft_pwm3.ChangeFrequency(10)
+        soft_pwm3.ChangeDutyCycle(6)
+    if new_ratio_F >= 60 and new_ratio_F <= 65:
+        soft_pwm3.ChangeFrequency(6)
+        soft_pwm3.ChangeDutyCycle(3)
+
+    
+    if new_ratio_F >= 8:
+        #force_diff = force_list_[-2] - force_list_[-1]
+        force_diff = (float(output_[-2][0:4])) - (float(output_[-1][0:4]))
+        #print(float(output_[-2][0:4]))
+        #print(float(output_[-1][0:4]))
+        #print(force_diff)
+    if force_diff >= 20:
+        GPIO.output(40,0)
+        GPIO.output(38,0)
+
         #ax = plt.gca()
         #line1, = ax.lines 
         #line1.set_data(x_vals,y_vals)
@@ -274,7 +312,8 @@ def animate(i,output_,r_,it_1,ch,ys):
     line.set_ydata(ys) #update line with new y values
     final_area = getContours(imgDil, imgContour)
     #output_.append([new_ratio_F,final_area])
-    output_1 = "{},{}".format(new_ratio_F,final_area)
+
+    output_1 = "{},{},{}".format(new_ratio_F,final_area,pix_intensity)
     #output_1 = (new_ratio_F,final_area)
     output_.append(output_1)
 
@@ -283,13 +322,27 @@ def animate(i,output_,r_,it_1,ch,ys):
 #*****************************************#         
 
 #**********Call to Animate Function**********#
-ani = FuncAnimation(fig_loadcell, animate, fargs= [output, r, it_1, ch, ys],interval=1,blit=True)
+ani = FuncAnimation(fig_loadcell, animate, fargs= [output,r,ch,ys],interval=1,blit=True)
 plt.show()
 
-#print(r)
+#**********Extend Actuator**********#
+#soft_pwm1.stop()
+soft_pwm3.ChangeFrequency(10)
+soft_pwm3.ChangeDutyCycle(100)
+GPIO.output(40,1)
+GPIO.output(38,0)
+#soft_pwm2.start(100)
+time.sleep(3)
+#soft_pwm2.stop()
+soft_pwm3.stop()
+GPIO.cleanup()
+
 #**********Output Data to a CSV File**********#
-header = ('Force','Area')
-with open('Force_Area_GA_show1.csv', 'w', encoding='UTF8') as f:
+header = ('Force (N)','Area (mm2)','Pixel Intensity (0-255)')
+file_name_csv = "/media/flexiv-user/LINUXCNC 2_/Actuator Integration/Force_Area_PI1_" + str(time.time()) + ".csv" #".h264"
+#Deleting output[0:2][:] (zero values for actuator actuation to run properly)
+#del output[0:2]
+with open(file_name_csv, 'w', encoding='UTF8') as f:
     f.write(",".join(header) + "\n")
     for x in output:
-        f.write(((x)) + "\n")
+        f.write((str(x)) + "\n")
